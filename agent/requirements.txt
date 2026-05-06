@@ -1,0 +1,8 @@
+# Agent runtime dependencies (deployed on AgentCore)
+strands-agents>=1.38.0
+boto3>=1.42.97
+pillow>=11.3.0
+pillow-heif>=1.1.1
+pypdf>=6.10.2
+python-dotenv>=1.0.0
+bedrock-agentcore>=1.6.2

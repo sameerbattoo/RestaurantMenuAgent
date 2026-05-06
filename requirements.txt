@@ -1,0 +1,8 @@
+# Local development dependencies (batch processing, testing)
+strands-agents>=1.38.0
+strands-agents-tools>=0.5.2
+boto3>=1.42.97
+pillow>=11.3.0
+pillow-heif>=1.1.1
+pypdf>=6.10.2
+python-dotenv>=1.0.0

@@ -1,0 +1,42 @@
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+infra/.cognito-config
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# ─── Node / Web UI ────────────────────────────────────────────────────────────
+webui/node_modules/
+webui/dist/
+webui/.env
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── AgentCore Build Artifacts ────────────────────────────────────────────────
+agent/.bedrock_agentcore/
+agent/.bedrock_agentcore.yaml
+
+# ─── Batch Processing Outputs ─────────────────────────────────────────────────
+batch_processing/batch_runs/run-*/
+!batch_processing/batch_runs/comparison-report.md
+
+# ─── Temp & Logs ──────────────────────────────────────────────────────────────
+*.log
+*.tmp
+/tmp/
