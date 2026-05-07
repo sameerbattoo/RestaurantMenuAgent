@@ -61,7 +61,7 @@ MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 
 # Sliding window: each menu processing turn uses ~8-12 internal messages,
 # so 20 gives room for ~2-3 full processing turns in context.
-SLIDING_WINDOW_SIZE = 20
+SLIDING_WINDOW_SIZE = int(os.environ.get("SLIDING_WINDOW_SIZE", "20"))
 
 # Session cache TTL (seconds). AgentCore idle timeout is 900s.
 SESSION_MAX_AGE = 1800
@@ -98,6 +98,7 @@ names, or implementation details to the user. Communicate naturally.**
 - Use markdown tables for menu data
 - Show categories, item counts, price ranges
 - Highlight dietary options (vegetarian, vegan, gluten-free)
+- When listing menus, always include clickable links to the original source files
 - Be concise but complete
 
 ## Editing:

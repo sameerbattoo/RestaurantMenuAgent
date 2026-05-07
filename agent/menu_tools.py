@@ -122,34 +122,55 @@ def list_restaurant_menus() -> str:
     List all restaurant menus stored in the database.
 
     Returns:
-        JSON with total count and list of menus (file name, restaurant, items, date)
+        JSON with total count and list of menus (file name, restaurant, items, date, source file URLs)
     """
+    from s3_storage import get_download_url
+
     items = []
     response = _table.scan(
-        ProjectionExpression="file_name, restaurant_name, metadata, processed_at"
+        ProjectionExpression="file_name, restaurant_name, metadata, processed_at, s3_key"
     )
     items.extend(response.get("Items", []))
 
     while "LastEvaluatedKey" in response:
         response = _table.scan(
-            ProjectionExpression="file_name, restaurant_name, metadata, processed_at",
+            ProjectionExpression="file_name, restaurant_name, metadata, processed_at, s3_key",
             ExclusiveStartKey=response["LastEvaluatedKey"],
         )
         items.extend(response.get("Items", []))
 
-    menus = sorted(
-        [
-            {
-                "file_name": _from_dynamodb(item).get("file_name", ""),
-                "restaurant_name": _from_dynamodb(item).get("restaurant_name", "Unknown"),
-                "total_items": _from_dynamodb(item).get("metadata", {}).get("total_items", 0),
-                "processed_at": _from_dynamodb(item).get("processed_at", ""),
-            }
-            for item in items
-        ],
-        key=lambda x: x.get("processed_at", ""),
-        reverse=True,
-    )
+    menus = []
+    for item in items:
+        item = _from_dynamodb(item)
+        # Collect all source file URLs
+        source_urls = []
+        s3_key = item.get("s3_key")
+        if s3_key:
+            source_urls.append(get_download_url(s3_key))
+        # Also include merged S3 keys from metadata
+        s3_keys = item.get("metadata", {}).get("s3_keys", [])
+        for key in s3_keys:
+            url = get_download_url(key)
+            if url not in source_urls:
+                source_urls.append(url)
+        # Also check merged_from file names (fallback for older entries without s3_keys)
+        if not s3_keys:
+            merged_from = item.get("metadata", {}).get("merged_from", [])
+            for mf in merged_from:
+                key = f"menu-uploads/originals/{mf}"
+                url = get_download_url(key)
+                if url not in source_urls:
+                    source_urls.append(url)
+
+        menus.append({
+            "file_name": item.get("file_name", ""),
+            "restaurant_name": item.get("restaurant_name", "Unknown"),
+            "total_items": item.get("metadata", {}).get("total_items", 0),
+            "processed_at": item.get("processed_at", ""),
+            "source_files": source_urls,
+        })
+
+    menus.sort(key=lambda x: x.get("processed_at", ""), reverse=True)
 
     return json.dumps({"total_menus": len(menus), "menus": menus}, indent=2)
 

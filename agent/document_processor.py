@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
-"""Document processor — extracts text from restaurant menu PDFs and images using Bedrock vision."""
+"""Document processor — extracts, validates, and persists restaurant menu data from PDFs and images.
 
-import base64
+Processing pipeline:
+- Text-based PDFs: PyPDF extraction → Haiku (Converse API) for JSON structuring.
+- Scanned PDFs / Images: Bedrock Converse API with Sonnet vision for extraction.
+- HEIC/HEIF: converted to JPEG before vision processing.
+- Images > 2048px: resized with Lanczos before sending to Bedrock.
+
+Validation:
+- Rejects files with zero extractable items.
+- Rejects files where > MAX_NO_PRICE_PERCENTAGE of items lack pricing.
+- Filters out individual no-price items before saving (with user warning).
+
+Conflict handling:
+- Fuzzy restaurant name matching (SequenceMatcher >= 0.8 threshold).
+- Recommends overwrite (>50% item overlap) or merge (new items found).
+- Caches extraction results in-memory to avoid re-processing on confirmation.
+"""
+
 import json
 import logging
 import os
@@ -26,17 +42,21 @@ except ImportError:
     logger.info("pillow-heif not available — HEIC support disabled")
 
 # Cache for extracted menu data (avoids re-processing on overwrite/merge confirmation)
-_extraction_cache: dict[str, dict] = {}  # file_path -> menu_data
+_extraction_cache: dict[str, dict] = {}  # file_path -> {menu_data, existing_entry}
 _cache_lock = threading.Lock()
+_CACHE_MAX_SIZE = 20  # Evict oldest entries beyond this limit
 
 # Supported formats
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
 HEIC_EXTENSIONS = {".heic", ".heif"}
 MAX_IMAGE_DIMENSION = 2048
 
+# Price validation: reject files where more than this % of items have no price
+MAX_NO_PRICE_PERCENTAGE = int(os.environ.get("MAX_NO_PRICE_PERCENTAGE", "50"))
+
 # Token limits for Bedrock model output
-MIN_OUTPUT_TOKENS = 4096
-MAX_OUTPUT_TOKENS_ANTHROPIC = 16384
+MAX_OUTPUT_TOKENS_ANTHROPIC = int(os.environ.get("MAX_OUTPUT_TOKENS_ANTHROPIC", "16384"))
+MAX_OUTPUT_TOKENS_HAIKU = 8192
 MAX_OUTPUT_TOKENS_NOVA = 10000
 
 MEDIA_TYPES = {
@@ -111,23 +131,42 @@ RULES:
 @tool
 def process_document(file_path: str, action: str = "auto") -> str:
     """
-    Process a restaurant menu document — extracts, structures, and handles conflicts intelligently.
+    Process a restaurant menu document — extracts, structures, validates pricing, and handles conflicts.
+
+    Pipeline:
+    1. Extraction: PDF text via PyPDF → Haiku structuring, or Bedrock vision (Sonnet) for images/scanned PDFs.
+    2. JSON parsing with repair (handles markdown fences, truncation, malformed keys).
+    3. Validation:
+       - Rejects files with zero items extracted.
+       - Rejects files where > MAX_NO_PRICE_PERCENTAGE of items lack pricing.
+       - Filters out individual items without prices (warns user about removed items).
+    4. Conflict detection (fuzzy restaurant name matching, SequenceMatcher >= 0.8):
+       - New restaurant → saves automatically to DynamoDB + S3.
+       - Existing restaurant → returns recommendation (overwrite if >50% item overlap, merge otherwise).
+    5. Caches extracted data in-memory for the second call (avoids re-processing on confirmation).
 
     On first call (action="auto"):
-    - Extracts and structures the menu
-    - Checks if the restaurant already exists in the database
-    - If new: saves automatically
-    - If exists: returns a recommendation (overwrite or merge) with details
+    - Extracts, validates, and checks for conflicts.
+    - If new: saves automatically, returns summary.
+    - If exists: returns conflict report with recommendation + instructions.
 
     On second call (action="overwrite" or action="merge"):
-    - Performs the requested action with the previously extracted data
+    - Uses cached extraction data (no re-processing).
+    - "overwrite": replaces the existing DynamoDB entry entirely.
+    - "merge": adds new categories/items into the existing entry (no duplicates).
 
     Args:
-        file_path: Path to the document file
-        action: "auto" (default), "overwrite", or "merge"
+        file_path: Path to the document file (PDF, JPG, PNG, HEIC, TIFF, WEBP, BMP).
+        action: "auto" (default — extract + detect conflicts),
+                "overwrite" (replace existing entry),
+                "merge" (combine into existing entry).
 
     Returns:
-        A summary of what was done, or a conflict report asking the user to choose.
+        JSON string with one of:
+        - Success: status, restaurant_name, categories, total_items, price_range, time_seconds.
+        - Conflict: status="conflict_detected", recommendation, overlap stats, instructions.
+        - Error: error message with context (file_name, time_seconds).
+        - Warning (on success): items_removed_no_price list if some items were filtered.
     """
     import time as _time
     from menu_tools import _get_menu, _put_menu, _compute_stats, _from_dynamodb
@@ -145,9 +184,11 @@ def process_document(file_path: str, action: str = "auto") -> str:
 
     # Check cache first (second call with action="overwrite"/"merge" skips extraction)
     with _cache_lock:
-        cached = _extraction_cache.get(file_path) if action in ("overwrite", "merge") else None
-    if cached is not None:
-        menu_data = cached
+        cached_entry = _extraction_cache.get(file_path) if action in ("overwrite", "merge") else None
+    items_without_price = []  # Default for cached path
+    if cached_entry is not None:
+        menu_data = cached_entry["menu_data"]
+        cached_existing = cached_entry.get("existing_entry")
     else:
         # Step 1: Extract and structure
         try:
@@ -184,17 +225,95 @@ def process_document(file_path: str, action: str = "auto") -> str:
                 "time_seconds": round(_time.time() - start, 2),
             })
 
+        # Check if there are any items at all
+        total_item_count = sum(len(cat.get("items", [])) for cat in categories)
+        if total_item_count == 0:
+            return json.dumps({
+                "error": "Extraction produced categories but no menu items. The file may not contain a valid menu.",
+                "file_name": file_name,
+                "categories_found": [cat.get("name", "") for cat in categories],
+                "time_seconds": round(_time.time() - start, 2),
+            }, indent=2)
+
+        # Step 3b: Price validation
+        all_items = []
+        items_without_price = []
+        for cat in categories:
+            for item in cat.get("items", []):
+                all_items.append(item)
+                price = item.get("price")
+                if not price or str(price).strip() in ("", "null", "None", "0"):
+                    items_without_price.append({
+                        "name": item.get("name", "Unknown"),
+                        "category": cat.get("name", "Unknown"),
+                    })
+
+        total_items = len(all_items)
+        no_price_count = len(items_without_price)
+        no_price_pct = (no_price_count / total_items * 100) if total_items > 0 else 0
+
+        # Reject if too many items have no price
+        if no_price_pct > MAX_NO_PRICE_PERCENTAGE:
+            return json.dumps({
+                "error": "Too many items without pricing — file rejected.",
+                "file_name": file_name,
+                "total_items": total_items,
+                "items_without_price": no_price_count,
+                "no_price_percentage": round(no_price_pct, 1),
+                "threshold": MAX_NO_PRICE_PERCENTAGE,
+                "reason": f"{no_price_count}/{total_items} items ({no_price_pct:.0f}%) have no price. Threshold is {MAX_NO_PRICE_PERCENTAGE}%.",
+                "time_seconds": round(_time.time() - start, 2),
+            }, indent=2)
+
+        # Remove items without price from the data before saving
+        if items_without_price:
+            for cat in categories:
+                cat["items"] = [
+                    item for item in cat.get("items", [])
+                    if item.get("price") and str(item["price"]).strip() not in ("", "null", "None", "0")
+                ]
+            # Remove empty categories after filtering
+            menu_data["categories"] = [cat for cat in categories if cat.get("items")]
+            categories = menu_data["categories"]
+
+            # If nothing remains after filtering, reject
+            if not categories:
+                return json.dumps({
+                    "error": "All menu items lack pricing — file rejected.",
+                    "file_name": file_name,
+                    "total_items_found": total_items,
+                    "items_without_price": no_price_count,
+                    "reason": "After removing items without prices, no items remain.",
+                    "time_seconds": round(_time.time() - start, 2),
+                }, indent=2)
+
         # Cache for potential second call
         with _cache_lock:
-            _extraction_cache[file_path] = menu_data
+            _extraction_cache[file_path] = {"menu_data": menu_data, "existing_entry": None}
+            # Evict oldest if cache exceeds limit
+            if len(_extraction_cache) > _CACHE_MAX_SIZE:
+                oldest_key = next(iter(_extraction_cache))
+                _extraction_cache.pop(oldest_key, None)
 
     new_restaurant = menu_data.get("restaurant_name", "").strip()
     new_items = _get_all_item_names(menu_data)
     s3_key = f"{_ORIGINALS_PREFIX}/{file_name}"
     stats = _compute_stats(menu_data)
 
-    # Step 4: Check for existing restaurant in DB
-    existing_entry = _find_existing_restaurant(new_restaurant)
+    # Build warning about removed items (if any)
+    price_warning = None
+    if items_without_price:
+        price_warning = {
+            "items_removed_no_price": len(items_without_price),
+            "removed_items": items_without_price[:10],  # Show first 10
+        }
+
+    # Step 4: Check for existing restaurant in DB (only on "auto" — skip on explicit action)
+    if action == "auto":
+        existing_entry = _find_existing_restaurant(new_restaurant)
+    else:
+        # On overwrite/merge, use cached existing_entry from first call
+        existing_entry = cached_existing if cached_entry else None
 
     if existing_entry is None or action == "overwrite":
         # No conflict OR user chose overwrite — save directly
@@ -207,7 +326,7 @@ def process_document(file_path: str, action: str = "auto") -> str:
         if action == "overwrite" and existing_entry:
             status = "Menu overwritten (replaced existing)"
 
-        return json.dumps({
+        result = {
             "status": status,
             "file_name": file_name,
             "restaurant_name": new_restaurant or "Unknown",
@@ -216,7 +335,11 @@ def process_document(file_path: str, action: str = "auto") -> str:
             "total_items": stats["total_items"],
             "price_range": stats["price_range"],
             "time_seconds": elapsed_total,
-        }, indent=2)
+        }
+        if price_warning:
+            result["warning"] = price_warning
+
+        return json.dumps(result, indent=2)
 
     elif action == "merge":
         # User chose merge — combine new items into existing entry
@@ -225,19 +348,29 @@ def process_document(file_path: str, action: str = "auto") -> str:
 
         if existing_menu:
             merge_result = _merge_into_existing(existing_menu, menu_data)
-            _put_menu(existing_file, existing_menu, s3_key=existing_menu.get("s3_key"))
 
-            # Track merged files
+            # Track merged files (before the single save)
             merged_from = existing_menu.get("metadata", {}).get("merged_from", [])
             if existing_file not in merged_from:
                 merged_from.append(existing_file)
             if file_name not in merged_from:
                 merged_from.append(file_name)
             existing_menu.setdefault("metadata", {})["merged_from"] = merged_from
+
+            # Preserve S3 keys from both original files
+            s3_keys = existing_menu.get("metadata", {}).get("s3_keys", [])
+            if existing_menu.get("s3_key") and existing_menu["s3_key"] not in s3_keys:
+                s3_keys.append(existing_menu["s3_key"])
+            new_s3_key = f"{_ORIGINALS_PREFIX}/{file_name}"
+            if new_s3_key not in s3_keys:
+                s3_keys.append(new_s3_key)
+            existing_menu.setdefault("metadata", {})["s3_keys"] = s3_keys
+
+            # Single save
             _put_menu(existing_file, existing_menu, s3_key=existing_menu.get("s3_key"))
 
             with _cache_lock:
-                _extraction_cache.pop(file_path, None)  # Clean cache
+                _extraction_cache.pop(file_path, None)
             elapsed_total = round(_time.time() - start, 2)
 
             return json.dumps({
@@ -263,6 +396,10 @@ def process_document(file_path: str, action: str = "auto") -> str:
     else:
         recommendation = "merge"
         reason = f"{total_new} new items found — this looks like an additional page/section"
+
+    # Update cache with existing_entry for the second call
+    with _cache_lock:
+        _extraction_cache[file_path] = {"menu_data": menu_data, "existing_entry": existing_entry}
 
     elapsed_total = round(_time.time() - start, 2)
 
@@ -301,7 +438,7 @@ def _process_pdf(file_path: str) -> str:
 
 
 def _structure_text_with_bedrock(raw_text: str) -> str:
-    """Use Bedrock text model to structure raw menu text into JSON (no vision needed).
+    """Use Bedrock Converse API to structure raw menu text into JSON (no vision needed).
     
     Uses Haiku for speed — structuring text into JSON doesn't need Sonnet's reasoning.
     """
@@ -326,30 +463,24 @@ Rules: prices as strings without $, null if missing, include ALL items, group by
 Menu text:
 {raw_text}"""
 
-    # Dynamic max_tokens based on input size
-    estimated_items = raw_text.count('\n') // 2
-    max_tokens = min(max(8192, estimated_items * 60), 32000)
-
-    response = client.invoke_model(
+    response = client.converse(
         modelId=model_id,
-        body=json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-        }),
+        messages=[{
+            "role": "user",
+            "content": [{"text": prompt}],
+        }],
+        inferenceConfig={"maxTokens": MAX_OUTPUT_TOKENS_HAIKU},
     )
 
-    body = json.loads(response["body"].read().decode("utf-8"))
-
-    # Report token usage
-    usage = body.get("usage", {})
+    output = response["output"]["message"]["content"][0]["text"]
+    usage = response.get("usage", {})
     report_usage(
-        input_tokens=usage.get("input_tokens", 0),
-        output_tokens=usage.get("output_tokens", 0),
+        input_tokens=usage.get("inputTokens", 0),
+        output_tokens=usage.get("outputTokens", 0),
         source="structure_text",
     )
 
-    return body["content"][0]["text"]
+    return output
 
 
 def _process_heic(file_path: str) -> str:

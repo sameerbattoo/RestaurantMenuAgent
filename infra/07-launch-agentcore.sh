@@ -42,6 +42,10 @@ ENV_FLAGS=(
     --env "DYNAMODB_TABLE=$DYNAMODB_TABLE"
     --env "MENU_S3_BUCKET=${BUCKET_NAME:-restaurant-menu-agent-webui-175918693907}"
     --env "CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN:-dd9h1kd8j199p.cloudfront.net}"
+    --env "MAX_NO_PRICE_PERCENTAGE=50"
+    --env "BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-6}"
+    --env "SLIDING_WINDOW_SIZE=${SLIDING_WINDOW_SIZE:-20}"
+    --env "MAX_OUTPUT_TOKENS_ANTHROPIC=${MAX_OUTPUT_TOKENS_ANTHROPIC:-16384}"
 )
 
 if [ -n "$AGENTCORE_MEMORY_ID" ]; then

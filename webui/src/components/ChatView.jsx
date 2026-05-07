@@ -341,10 +341,10 @@ function ChatView({ theme, toggleTheme }) {
               <div
                 className={`max-w-[75%] rounded-2xl px-4 py-3 transition-all duration-300 hover:shadow-lg hover:-translate-y-0.5 ${
                   msg.role === 'user'
-                    ? 'bg-gradient-to-br from-brand-500 to-brand-600 text-white shadow-md shadow-brand-500/15'
+                    ? 'bg-gradient-to-br from-brand-500 to-brand-600 text-white shadow-md shadow-brand-500/15 hover:border-brand-300 hover:ring-1 hover:ring-brand-300/50'
                     : msg.isError
-                    ? 'bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/50 text-red-700 dark:text-red-300'
-                    : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-800 dark:text-gray-200 shadow-sm'
+                    ? 'bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/50 text-red-700 dark:text-red-300 hover:border-red-400 dark:hover:border-red-600'
+                    : 'bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-800 dark:text-gray-200 shadow-sm hover:border-brand-400 dark:hover:border-brand-500 hover:ring-1 hover:ring-brand-400/30 dark:hover:ring-brand-500/30'
                 }`}
               >
                 {msg.role === 'user' ? (
@@ -440,10 +440,12 @@ function ChatView({ theme, toggleTheme }) {
         </div>
       </div>
 
-      {/* File preview bar */}
-      {files.length > 0 && (
-        <div className="sticky bottom-[72px] z-10 border-t border-gray-200 dark:border-gray-800 bg-brand-50/50 dark:bg-brand-950/20 px-4 py-2.5">
-          <div className="max-w-7xl mx-auto flex flex-wrap gap-2">
+      {/* Bottom area (file preview + input) — pinned to bottom */}
+      <div className="sticky bottom-0 z-10">
+        {/* File preview bar */}
+        {files.length > 0 && (
+          <div className="border-t border-gray-200 dark:border-gray-800 bg-brand-50/50 dark:bg-brand-950/20 px-4 py-2.5">
+            <div className="max-w-7xl mx-auto flex flex-wrap gap-2">
             {files.map((file, i) => (
               <div
                 key={i}
@@ -474,7 +476,7 @@ function ChatView({ theme, toggleTheme }) {
       )}
 
       {/* Input area */}
-      <div className="sticky bottom-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-4 py-4">
+      <div className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-4 py-4">
         <div className="max-w-7xl mx-auto">
           <div className="flex items-end gap-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl px-3 py-2 focus-within:ring-2 focus-within:ring-brand-500/50 focus-within:border-brand-400 dark:focus-within:border-brand-500 transition-all">
             {/* File upload button */}
@@ -528,6 +530,7 @@ function ChatView({ theme, toggleTheme }) {
           </p>
         </div>
       </div>
+      </div>{/* end sticky bottom wrapper */}
     </div>
   )
 }
