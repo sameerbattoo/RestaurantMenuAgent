@@ -233,15 +233,41 @@ def generate_report(RUNS: dict) -> str:
         lines.append(row)
         lines.append("")
 
-    # Recommendation
+    # Recommendation (data-driven from run results)
     lines.append("---\n")
     lines.append("## Recommendation\n")
-    lines.append("| Use Case | Recommended | Rationale |")
-    lines.append("|----------|-------------|-----------|")
-    lines.append("| Production (accuracy) | Sonnet | Best quality-to-cost ratio |")
-    lines.append("| Large/complex menus | Sonnet/Opus | Most reliable on 100+ item menus |")
-    lines.append("| Bulk processing (cost) | Nova Pro | Cheapest per item, fast |")
-    lines.append("")
+
+    if meta:
+        # Find best model per metric
+        best_cost = min(models, key=lambda m: meta.get(m, {}).get("cost", 999))
+        best_items = max(models, key=lambda m: totals[m]["items"])
+        best_accuracy = max(models, key=lambda m: totals[m]["price"] + totals[m]["dietary"])
+        best_speed = min(models, key=lambda m: meta.get(m, {}).get("duration", 999))
+
+        # Cost per item
+        cost_per_item = {m: meta.get(m, {}).get("cost", 0) / max(totals[m]["items"], 1) for m in models}
+        best_value = min(models, key=lambda m: cost_per_item[m])
+
+        lines.append("**Based on this run's results:**\n")
+        lines.append("| Metric | Winner | Value |")
+        lines.append("|--------|--------|-------|")
+        lines.append(f"| Most items extracted | {best_items} | {totals[best_items]['items']} items |")
+        lines.append(f"| Best accuracy (price + dietary) | {best_accuracy} | {totals[best_accuracy]['price']} priced, {totals[best_accuracy]['dietary']} dietary |")
+        lines.append(f"| Lowest total cost | {best_cost} | ${meta.get(best_cost, {}).get('cost', 0):.4f} |")
+        lines.append(f"| Best cost per item | {best_value} | ${cost_per_item[best_value]:.5f}/item |")
+        lines.append(f"| Fastest | {best_speed} | {meta.get(best_speed, {}).get('duration', 0):.1f}s |")
+        lines.append("")
+
+        lines.append("**Use case guidance:**\n")
+        lines.append("| Use Case | Recommended | Rationale |")
+        lines.append("|----------|-------------|-----------|")
+        lines.append(f"| Production (accuracy + cost) | {best_value} | Best cost-per-item with strong quality |")
+        lines.append(f"| Maximum coverage | {best_items} | Extracts the most items from menus |")
+        lines.append(f"| Budget-constrained bulk | {best_cost} | Lowest total cost across all files |")
+        lines.append(f"| Speed-critical | {best_speed} | Fastest total processing time |")
+        lines.append("")
+    else:
+        lines.append("*No run metadata available for recommendations.*\n")
 
     return "\n".join(lines)
 

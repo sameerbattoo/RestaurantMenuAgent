@@ -196,20 +196,30 @@ All scripts are idempotent — safe to re-run. Configuration is saved to `infra/
 ### Processing Pipeline
 
 ```
-PDF Upload                          Image Upload (JPG/HEIC/PNG)
-    │                                       │
-    ▼                                       ▼
-PyPDF Text Extraction (instant)     Resize if > 2048px
-    │                                       │
-    ▼                                       ▼
-Haiku 4.5 — Text → JSON            Sonnet 4.6 — Vision → JSON
-(fast, cheap: ~$0.01/file)          (accurate: ~$0.03-0.05/file)
-    │                                       │
-    └───────────────┬───────────────────────┘
-                    ▼
-            Save to DynamoDB
-            Upload to S3
-            Return summary
+PDF Upload                          Image Upload
+    │                                   │
+    ▼                                   ├── HEIC/HEIF? ──► Convert to JPEG
+PyPDF Text Extraction (instant)         │                       │
+    │                                   ├── > 2048px? ──► Resize (Lanczos)
+    ├── Text found?                     │                       │
+    │   YES ──► Haiku 4.5 (Text→JSON)  ▼                       ▼
+    │           (fast: ~$0.01/file)     Sonnet 4.6 — Vision → JSON
+    │                                  (accurate: ~$0.03-0.05/file)
+    │   NO (scanned PDF) ─────────────────────┘
+    │                                          │
+    └──────────────────┬───────────────────────┘
+                       ▼
+               Price Validation
+               (reject if >50% items lack price,
+                filter individual no-price items)
+                       │
+                       ▼
+               Conflict Detection
+               (fuzzy match restaurant name in DB)
+                       │
+                       ▼
+               Save to DynamoDB + Upload to S3
+               Return summary
 ```
 
 ### Why This Architecture
@@ -218,55 +228,93 @@ Haiku 4.5 — Text → JSON            Sonnet 4.6 — Vision → JSON
 2. **Scanned PDFs / Images** → Bedrock Converse API with Sonnet vision (best accuracy for complex menus).
 3. **HTML Regeneration** → Python template (instant, zero tokens). Only style analysis uses an LLM call (once, cached).
 
+### Agent Model: Sonnet 4.6 (Converse API)
+
+The agent uses **Claude Sonnet 4.6** for vision-based menu extraction. Because all Bedrock calls use the **Converse API** (model-agnostic), the model can be switched to any Bedrock-supported model (Opus, Nova Pro, Haiku, etc.) by changing the `BEDROCK_MODEL_ID` environment variable — no code changes required.
+
+> **Note on Textract:** If you want to use the Textract TABLES pipeline (highest item coverage, best dietary detection) in the agent, the pipeline built in `batch_processing/document_processor.py` needs to be integrated into `agent/document_processor.py`. This is a future enhancement — the batch processing folder contains the complete, tested implementation ready for integration.
+
 ### Model Comparison Results
 
-From batch processing 12 restaurant menus (PDFs + images):
+From batch processing 12 restaurant menus (PDFs + images) with all 4 extraction methods:
 
-| Metric | Sonnet 4.6 | Opus 4.7 | Nova Pro |
-|--------|-----------|----------|----------|
-| Success Rate | **12/12** | **12/12** | 11/12 |
-| Duration | **81s** | 81s | 82s |
-| Items Extracted | **608** | 593 | 666* |
-| Cost | **$0.92** | $3.63 | $0.34 |
-| Dietary Info | **57%** | 56% | 27% |
-| Descriptions | 64% | **69%** | 67% |
+| Metric | Sonnet 4.6 | Opus 4.7 | Nova Pro | Textract + Haiku |
+|--------|-----------|----------|----------|-----------------|
+| Success Rate | **12/12** | **12/12** | **12/12** | **12/12** |
+| Duration | 82s | 84s | **69s** | 88s |
+| Items Extracted | 599 | **634** | 596 | 610 |
+| Items with Price | 93% | **95%** | 92% | 91% |
+| Dietary Info | 59% | 54% | 29% | **66%** |
+| Descriptions | 65% | **70%** | 65% | 57% |
+| **Total Cost** | $0.90 | $3.62 | **$0.32** | $0.63 |
+| Cost per Item | $0.0015 | $0.0057 | **$0.0005** | $0.0010 |
 
-*Nova Pro extracts more items but misses dietary info and occasionally produces malformed JSON.
-
-**Recommendation:** Sonnet 4.6 for production — best reliability, quality-to-cost ratio, and consistent JSON output.
+**Recommendation:** Sonnet 4.6 for the agent (production) — best balance of accuracy, reliability, and cost. Textract pipeline is the best choice for bulk/batch processing where maximum item coverage matters.
 
 ### Key Optimizations
 
-- **Dynamic max_tokens** — Scales output limit based on model (Nova: 10K, Anthropic: 16K) to avoid truncation.
+- **Dynamic max_tokens** — Scales output limit based on model (Nova: 10K, Haiku: 8K, Anthropic: 16K) to avoid truncation.
 - **Converse API** — Model-agnostic API that works with all Bedrock models without format branching.
 - **JSON repair** — Handles common LLM malformations (missing quotes, markdown fences, truncated output).
 - **Extraction cache** — Second calls (overwrite/merge confirmation) skip re-processing using in-memory cache.
 - **Adaptive retries** — boto3 adaptive retry mode with exponential backoff on all Bedrock calls.
 - **Parallel tool execution** — Multiple files processed simultaneously via Strands parallel tool calls.
+- **Price validation** — Rejects files where >50% of items lack pricing; filters individual no-price items before saving.
 
 ---
 
 ## Batch Processing
 
-Run model comparisons locally without the agent:
+The `batch_processing/` folder is a standalone test harness for comparing extraction methods without the agent. It calls document processing functions directly for maximum speed and supports 4 extraction methods.
+
+### Supported Models
+
+| Model | Method | Best For |
+|-------|--------|----------|
+| `sonnet` | LLM Vision (Converse API) | Production accuracy |
+| `opus` | LLM Vision (Converse API) | Maximum item extraction |
+| `nova-pro` | LLM Vision (Converse API) | Lowest cost, fastest |
+| `textract` | Textract TABLES → Haiku structuring | Best item coverage + dietary detection |
+
+### Textract Pipeline
+
+The Textract pipeline uses a two-stage approach:
+
+```
+┌─────────────┐     ┌──────────────────────┐     ┌─────────────────┐     ┌──────────┐
+│  Menu File  │ ──► │  AWS Textract        │ ──► │  Table Parser   │ ──► │  Haiku   │ ──► JSON
+│ (image/PDF) │     │  (TABLES feature)    │     │  (Python logic) │     │  (LLM)   │
+└─────────────┘     └──────────────────────┘     └─────────────────┘     └──────────┘
+```
+
+1. **Textract TABLES** — Detects table structures in the menu (item names aligned with prices). Works even without grid borders because menus are visually tabular.
+2. **Table Parser** — Extracts row/column cells, resolves WORD children, separates non-table lines (headers, restaurant name).
+3. **Formatted Output** — Produces `Item Name | Price` lines that give Haiku unambiguous pairing.
+4. **Haiku Structuring** — Converts the formatted text into the standard JSON schema.
+
+**Why TABLES?** Benchmarked all Textract FeatureTypes on 12 menus: TABLES extracted 607 items (matching Sonnet's 608), while LAYOUT only got 320 (prices disconnected from items).
+
+**Routing:** Single-page files use the sync API (send bytes directly). Multi-page PDFs use the async API (upload to S3 → poll → paginate → cleanup).
+
+### Usage
 
 ```bash
 cd batch_processing/
 
-# Process all sample menus with Sonnet (vision)
+# Run all 4 models and generate comparison report (one-click)
+bash run_all_models.sh
+
+# Or run individual models
 python batch_process_menus.py --model sonnet
-
-# Try with Nova Pro (cheaper but less reliable)
+python batch_process_menus.py --model textract
 python batch_process_menus.py --model nova-pro
-
-# Try with Opus (most expensive)
 python batch_process_menus.py --model opus
 
-# Generate comparison report
-python compare_runs.py -o batch_runs/comparison-report.md
+# Custom options
+python batch_process_menus.py --model sonnet --workers 3 --dir /path/to/menus
 
-# Compare only last 2 runs
-python compare_runs.py --last 2
+# Generate comparison report (last N runs)
+python compare_runs.py --last 4 -o batch_runs/comparison-report.md
 ```
 
 ---

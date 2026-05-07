@@ -26,6 +26,9 @@ from document_processor import (
     _process_image,
     _extract_pdf_text,
     _call_bedrock_vision,
+    process_with_textract,
+    reset_thread_usage,
+    _get_thread_usage,
     IMAGE_EXTENSIONS,
     HEIC_EXTENSIONS,
 )
@@ -60,24 +63,36 @@ MODELS = {
         "display_name": "Claude Sonnet 4.6",
         "input_per_1m": 3.00,
         "output_per_1m": 15.00,
+        "type": "llm_vision",
     },
     "haiku": {
         "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "display_name": "Claude Haiku 4.5",
         "input_per_1m": 0.80,
         "output_per_1m": 4.00,
+        "type": "llm_vision",
     },
     "nova-pro": {
         "model_id": "us.amazon.nova-pro-v1:0",
         "display_name": "Amazon Nova Pro",
         "input_per_1m": 0.80,
         "output_per_1m": 3.20,
+        "type": "llm_vision",
     },
     "opus": {
         "model_id": "us.anthropic.claude-opus-4-7",
         "display_name": "Claude Opus 4.7",
         "input_per_1m": 15.00,
         "output_per_1m": 75.00,
+        "type": "llm_vision",
+    },
+    "textract": {
+        "model_id": "textract-tables",
+        "display_name": "Textract TABLES + Haiku",
+        "input_per_1m": 0.80,   # Haiku structuring cost (input tokens)
+        "output_per_1m": 4.00,  # Haiku structuring cost (output tokens)
+        "textract_per_page": 0.015,  # Textract TABLES feature per page
+        "type": "textract",
     },
 }
 
@@ -122,13 +137,20 @@ def process_single_file(file_path: str, output_path: str, vision_model_id: str) 
     # Set the vision model for this call
     os.environ["BEDROCK_MODEL_ID"] = vision_model_id
 
-    # Reset token tracking for this file
+    # Reset token tracking for this file (thread-local for parallel safety)
     import document_processor as dp
     dp._last_usage = {"input_tokens": 0, "output_tokens": 0}
+    dp._textract_usage = {"pages": 0}
+    reset_thread_usage()
+
+    model_key = os.environ.get("_BATCH_MODEL_KEY", "sonnet")
+    model_config = MODELS[model_key]
 
     try:
-        # Call the appropriate processor directly
-        if ext == ".pdf":
+        # Route to the correct processor based on method type
+        if model_config.get("type") == "textract":
+            result_text = process_with_textract(file_path)
+        elif ext == ".pdf":
             result_text = _process_pdf(file_path)
         elif ext in HEIC_EXTENSIONS:
             result_text = _process_heic(file_path)
@@ -155,20 +177,33 @@ def process_single_file(file_path: str, output_path: str, vision_model_id: str) 
             total_items = sum(len(c.get("items", [])) for c in menu_data.get("categories", []))
             restaurant = menu_data.get("restaurant_name", "Unknown")
 
-            # Get token usage
-            usage = dp._last_usage
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
-            # Cost depends on which model processed the file
-            # PDFs with text use Haiku; images/scanned PDFs use the vision model
-            is_text_pdf = ext == ".pdf" and _extract_pdf_text(file_path) is not None
-            if is_text_pdf:
-                cost = (input_tokens * HAIKU_INPUT_PER_1M + output_tokens * HAIKU_OUTPUT_PER_1M) / 1_000_000
+            # Get token usage (thread-local for parallel safety)
+            thread_usage, textract_thread_usage = _get_thread_usage()
+            if model_config.get("type") == "textract":
+                input_tokens = thread_usage.get("input_tokens", 0)
+                output_tokens = thread_usage.get("output_tokens", 0)
             else:
-                cost = (input_tokens * MODELS[os.environ.get("_BATCH_MODEL_KEY", "sonnet")]["input_per_1m"] +
-                        output_tokens * MODELS[os.environ.get("_BATCH_MODEL_KEY", "sonnet")]["output_per_1m"]) / 1_000_000
+                usage = dp._last_usage
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
 
-            return {
+            # Calculate cost based on method type
+            if model_config.get("type") == "textract":
+                # Textract cost = pages × per-page price + Haiku token cost
+                textract_pages = textract_thread_usage.get("pages", 0)
+                textract_cost = textract_pages * model_config.get("textract_per_page", 0.015)
+                haiku_cost = (input_tokens * HAIKU_INPUT_PER_1M + output_tokens * HAIKU_OUTPUT_PER_1M) / 1_000_000
+                cost = textract_cost + haiku_cost
+            else:
+                # LLM-only cost
+                is_text_pdf = ext == ".pdf" and _extract_pdf_text(file_path) is not None
+                if is_text_pdf:
+                    cost = (input_tokens * HAIKU_INPUT_PER_1M + output_tokens * HAIKU_OUTPUT_PER_1M) / 1_000_000
+                else:
+                    cost = (input_tokens * MODELS[model_key]["input_per_1m"] +
+                            output_tokens * MODELS[model_key]["output_per_1m"]) / 1_000_000
+
+            result = {
                 "file": file_name,
                 "output_json": output_path,
                 "duration_seconds": duration,
@@ -179,6 +214,14 @@ def process_single_file(file_path: str, output_path: str, vision_model_id: str) 
                 "cost_usd": round(cost, 5),
                 "success": True,
             }
+
+            # Add Textract-specific metadata
+            if model_config.get("type") == "textract":
+                result["textract_pages"] = textract_thread_usage.get("pages", 0)
+                result["textract_cost_usd"] = round(textract_cost, 5)
+                result["haiku_cost_usd"] = round(haiku_cost, 5)
+
+            return result
         else:
             # Save raw text for debugging
             with open(output_path + ".raw.txt", "w", encoding="utf-8") as f:
@@ -272,8 +315,13 @@ def main():
     print(f"  Output directory : {output_dir}")
     print(f"  Files to process : {len(menu_files)}")
     print(f"  Parallel workers : {args.workers}")
-    print(f"  Vision model     : {model_config['display_name']} ({model_config['model_id']})")
-    print(f"  PDF structuring  : Haiku 4.5 (hardcoded)")
+    if model_config.get("type") == "textract":
+        print(f"  Method           : Textract TABLES → Haiku structuring")
+        print(f"  OCR engine       : AWS Textract (TABLES feature)")
+        print(f"  Structuring      : Haiku 4.5")
+    else:
+        print(f"  Vision model     : {model_config['display_name']} ({model_config['model_id']})")
+        print(f"  PDF structuring  : Haiku 4.5 (hardcoded)")
     print(f"{'='*70}\n")
 
     results = []
@@ -334,6 +382,7 @@ def main():
     log_data = {
         "run_timestamp": timestamp,
         "model": args.model,
+        "method_type": model_config.get("type", "llm_vision"),
         "vision_model_id": model_config["model_id"],
         "vision_model_name": model_config["display_name"],
         "pdf_structuring_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -348,6 +397,15 @@ def main():
         "total_cost_usd": round(total_cost, 5),
         "results": results,
     }
+    # Add Textract-specific aggregate metrics
+    if model_config.get("type") == "textract":
+        total_pages = sum(r.get("textract_pages", 0) for r in results)
+        total_textract_cost = sum(r.get("textract_cost_usd", 0) for r in results)
+        total_haiku_cost = sum(r.get("haiku_cost_usd", 0) for r in results)
+        log_data["total_textract_pages"] = total_pages
+        log_data["total_textract_cost_usd"] = round(total_textract_cost, 5)
+        log_data["total_haiku_cost_usd"] = round(total_haiku_cost, 5)
+
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(log_data, f, indent=2)
     print(f"\n📝 Log saved to: {log_path}\n")
