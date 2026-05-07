@@ -27,6 +27,7 @@ from memory_hook import MenuMemoryHook
 from metrics import TokenAccumulator, set_current_accumulator
 from menu_tools import (
     add_menu_item,
+    delete_menu,
     export_menu_json,
     get_current_menu,
     list_restaurant_menus,
@@ -77,8 +78,9 @@ names, or implementation details to the user. Communicate naturally.**
 2. **Show stored menus** — List all menus saved in the database
 3. **Edit menus** — Add, remove, update items, rename restaurants/categories
 4. **Merge menus** — Combine multiple files from the same restaurant into one entry
-5. **Export menus** — Provide full structured data for any stored menu
-6. **Regenerate menu** — Create a styled HTML version of the menu matching the original design
+5. **Delete menus** — Remove a restaurant menu from the database entirely
+6. **Export menus** — Provide full structured data for any stored menu
+7. **Regenerate menu** — Create a styled HTML version of the menu matching the original design
 
 ## When a user uploads a menu file:
 
@@ -131,6 +133,7 @@ TOOLS = [
     rename_restaurant,
     rename_category,
     merge_menu,
+    delete_menu,
     export_menu_json,
     analyze_menu_style,
     regenerate_menu_html,
@@ -233,19 +236,19 @@ def _extract_actor_id(context) -> str:
 
 
 def _extract_user_name(context) -> str:
-    """Extract user's display name from the Authorization JWT token."""
+    """Extract user's display name from the Authorization JWT token (access token)."""
     headers = getattr(context, "request_headers", {}) or {}
-    auth = headers.get("authorization", "")
-    if not auth:
+    auth_header = headers.get("Authorization") or headers.get("authorization", "")
+    if not auth_header:
         return ""
-    token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else auth
     try:
-        import base64
-        payload = token.split(".")[1]
-        # Add padding if needed
-        payload += "=" * (4 - len(payload) % 4)
-        claims = json.loads(base64.b64decode(payload))
-        return claims.get("name", "") or claims.get("email", "") or claims.get("username", "") or claims.get("cognito:username", "")
+        import jwt
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else auth_header
+        claims = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
+        username = claims.get("username", "")
+        if username.startswith("federate_"):
+            return username.replace("federate_", "")
+        return username or claims.get("email", "") or claims.get("name", "")
     except Exception:
         return ""
 

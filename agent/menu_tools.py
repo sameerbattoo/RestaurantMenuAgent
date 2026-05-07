@@ -99,54 +99,6 @@ def _compute_stats(menu_data: dict) -> dict:
 
 @tool
 @timed_tool
-def save_menu(file_name: str, menu_json: str) -> str:
-    """
-    Save a structured menu to the database, keyed by file name.
-    Overwrites any existing entry for the same file.
-
-    Args:
-        file_name: Source file name (e.g., "menu1.pdf", "IMG_4475.HEIC")
-        menu_json: JSON string with the structured menu data
-
-    Returns:
-        Confirmation with summary statistics
-    """
-    try:
-        menu_data = json.loads(menu_json)
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": f"Invalid JSON: {e}"})
-
-    # Reject empty/invalid menus
-    if not menu_data.get("categories") or len(menu_data["categories"]) == 0:
-        return json.dumps({"error": "Cannot save an empty menu. Extract the menu content first."})
-
-    # Check if there's an S3 key for this file (from upload)
-    s3_key = None
-    try:
-        from s3_storage import _ORIGINALS_PREFIX
-        # The S3 key follows a predictable pattern
-        s3_key = f"{_ORIGINALS_PREFIX}/{file_name}"
-    except Exception:
-        pass
-
-    # Also preserve existing s3_key if menu was previously saved
-    existing = _get_menu(file_name)
-    if existing and existing.get("s3_key") and not s3_key:
-        s3_key = existing["s3_key"]
-
-    _put_menu(file_name, menu_data, s3_key=s3_key)
-    stats = _compute_stats(menu_data)
-
-    return json.dumps({
-        "status": "Menu saved successfully",
-        "file_name": file_name,
-        "restaurant_name": menu_data.get("restaurant_name", "Unknown"),
-        **stats,
-    }, indent=2)
-
-
-@tool
-@timed_tool
 def get_current_menu(file_name: str) -> str:
     """
     Retrieve a menu from the database by file name.
@@ -522,4 +474,33 @@ def merge_menu(target_file_name: str, source_file_name: str) -> str:
         "updated_categories": updated_categories,
         "total_items_now": total_items,
         "all_source_files": merged_files,
+    }, indent=2)
+
+
+@tool
+@timed_tool
+def delete_menu(file_name: str) -> str:
+    """
+    Delete a restaurant menu from the database.
+
+    Args:
+        file_name: The menu file name to delete
+
+    Returns:
+        Confirmation or error
+    """
+    menu = _get_menu(file_name)
+    if not menu:
+        return json.dumps({"error": f"No menu found for '{file_name}'."})
+
+    restaurant_name = menu.get("restaurant_name", "Unknown")
+    total_items = sum(len(c.get("items", [])) for c in menu.get("categories", []))
+
+    _table.delete_item(Key={"file_name": file_name})
+
+    return json.dumps({
+        "status": "Menu deleted",
+        "file_name": file_name,
+        "restaurant_name": restaurant_name,
+        "items_removed": total_items,
     }, indent=2)

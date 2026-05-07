@@ -43,9 +43,11 @@ def get_download_url(s3_key: str) -> str:
         s3_key: The S3 object key
 
     Returns:
-        Public CloudFront URL
+        Public CloudFront URL (properly encoded)
     """
-    return f"https://{_CLOUDFRONT_DOMAIN}/{s3_key}"
+    from urllib.parse import quote
+    encoded_key = quote(s3_key, safe="/")
+    return f"https://{_CLOUDFRONT_DOMAIN}/{encoded_key}"
 
 
 def download_to_bytes(s3_key: str) -> bytes:
