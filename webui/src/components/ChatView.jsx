@@ -67,9 +67,85 @@ function ChatView({ theme, toggleTheme }) {
     sessionStorage.setItem('chat_session_id', id)
     return id
   })
+  const [suggestions, setSuggestions] = useState([
+    { icon: '📋', text: 'List all my restaurants' },
+    { icon: '📊', text: 'Which menu has the most items?' },
+    { icon: '🍽️', text: 'Show me a random menu' },
+    { icon: '🔍', text: 'What can you help me with?' },
+  ])
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
+
+  // Fetch restaurant names on mount for dynamic suggestions
+  useEffect(() => {
+    let cancelled = false
+    const fetchRestaurants = async () => {
+      try {
+        const token = sessionStorage.getItem('access_token')
+        if (!token) return
+
+        const { default: appConfig } = await import('../config')
+        const escapedArn = encodeURIComponent(appConfig.agentcoreArn)
+        const url = `https://bedrock-agentcore.${appConfig.region}.amazonaws.com/runtimes/${escapedArn}/invocations?qualifier=DEFAULT`
+
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+            'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': `suggestions-${Date.now()}`,
+          },
+          body: JSON.stringify({ prompt: 'list restaurants names only, respond with just a comma-separated list of restaurant names, nothing else', session_id: `suggestions-${Date.now()}` }),
+        })
+
+        if (!resp.ok) return
+
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let fullText = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value, { stream: true })
+          const lines = chunk.split('\n')
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            let data = line.slice(6).trim()
+            if (data.startsWith('"') && data.endsWith('"')) {
+              try { data = JSON.parse(data) } catch { data = data.slice(1, -1) }
+            }
+            if (data && !data.startsWith('[TOOL') && !data.startsWith('[METRICS]')) {
+              fullText += data
+            }
+          }
+        }
+
+        if (cancelled) return
+
+        // Try to extract restaurant names (comma-separated or line-separated)
+        const names = fullText
+          .replace(/\*\*/g, '')
+          .split(/[,\n|•]/)
+          .map(n => n.replace(/^\d+[\.\)]\s*/, '').trim())
+          .filter(n => n.length > 3 && n.length < 40 && !n.match(/^(here|total|restaurant|menu|stored|list|all|your|the|i |you)/i))
+
+        if (names.length >= 2) {
+          const shuffled = names.sort(() => Math.random() - 0.5)
+          const icons = ['🍛', '🌮', '🍜', '🥘', '🍕', '🥗']
+          setSuggestions([
+            { icon: '📋', text: 'List all my restaurants' },
+            { icon: icons[Math.floor(Math.random() * icons.length)], text: `Show me the ${shuffled[0]} menu` },
+            { icon: icons[Math.floor(Math.random() * icons.length)], text: `Regenerate HTML for ${shuffled[1]}` },
+            { icon: '📊', text: 'Which menu has the most items?' },
+          ])
+        }
+      } catch { /* silently fail — static suggestions remain */ }
+    }
+
+    fetchRestaurants()
+    return () => { cancelled = true }
+  }, [])
 
   const handleNewConversation = () => {
     const id = crypto.randomUUID()
@@ -78,6 +154,92 @@ function ChatView({ theme, toggleTheme }) {
     setMessages([])
     setLoading(false)
     setCookingActive(false)
+  }
+
+  const handleQuickAction = (text) => {
+    if (loading) return
+    setInput(text)
+    // Directly trigger send with the text (bypasses stale state)
+    setMessages((prev) => [...prev, { role: 'user', content: text }])
+    setInput('')
+    setLoading(true)
+    ;(async () => {
+      try {
+        setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true }])
+        await invokeAgent(text, [], sessionId, (event) => {
+          switch (event.type) {
+            case 'content':
+              setCookingActive(false)
+              setMessages((prev) => {
+                const updated = [...prev]
+                const last = updated[updated.length - 1]
+                if (last && last.role === 'assistant') {
+                  updated[updated.length - 1] = { ...last, content: last.content + event.data }
+                }
+                return updated
+              })
+              break
+            case 'tool_use':
+              setMessages((prev) => {
+                const updated = [...prev]
+                const last = updated[updated.length - 1]
+                if (last && last.role === 'assistant') {
+                  const toolName = event.data.trim()
+                  let icon = '🔧', label = toolName
+                  if (toolName === 'list_restaurant_menus') { icon = '📋'; label = 'Checking stored menus...' }
+                  else if (toolName === 'get_current_menu') { icon = '🔍'; label = 'Loading menu data...' }
+                  else if (toolName === 'process_document') { icon = '👨‍🍳'; label = 'Extracting menu items...' }
+                  const separator = last.content.endsWith('\n') ? '' : '\n\n'
+                  updated[updated.length - 1] = { ...last, content: last.content + `${separator}${icon} *${label}*\n\n` }
+                }
+                return updated
+              })
+              break
+            case 'metrics':
+              setMessages((prev) => {
+                const updated = [...prev]
+                const last = updated[updated.length - 1]
+                if (last && last.role === 'assistant') {
+                  updated[updated.length - 1] = { ...last, metrics: event.data }
+                }
+                return updated
+              })
+              break
+            case 'error':
+              setMessages((prev) => {
+                const updated = [...prev]
+                const last = updated[updated.length - 1]
+                if (last && last.role === 'assistant') {
+                  updated[updated.length - 1] = { ...last, content: event.data, isError: true, isStreaming: false }
+                }
+                return updated
+              })
+              break
+            case 'done':
+              setMessages((prev) => {
+                const updated = [...prev]
+                const last = updated[updated.length - 1]
+                if (last && last.role === 'assistant') {
+                  updated[updated.length - 1] = { ...last, isStreaming: false }
+                }
+                return updated
+              })
+              break
+          }
+        })
+      } catch (err) {
+        setMessages((prev) => {
+          const updated = [...prev]
+          const last = updated[updated.length - 1]
+          if (last && last.role === 'assistant') {
+            updated[updated.length - 1] = { ...last, content: `Error: ${err.message}`, isError: true, isStreaming: false }
+          }
+          return updated
+        })
+      } finally {
+        setLoading(false)
+      }
+    })()
   }
 
   useEffect(() => {
@@ -318,6 +480,20 @@ function ChatView({ theme, toggleTheme }) {
                   >
                     {fmt}
                   </span>
+                ))}
+              </div>
+              {/* Quick action bubbles */}
+              <div className="flex flex-wrap justify-center gap-2.5 mt-8 max-w-lg mx-auto">
+                {suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.text}
+                    onClick={() => handleQuickAction(suggestion.text)}
+                    disabled={loading}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-300 hover:border-brand-400 dark:hover:border-brand-500 hover:bg-brand-50 dark:hover:bg-brand-950/30 hover:text-brand-600 dark:hover:text-brand-400 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <span>{suggestion.icon}</span>
+                    <span>{suggestion.text}</span>
+                  </button>
                 ))}
               </div>
             </div>
