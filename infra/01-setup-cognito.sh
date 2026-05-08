@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # 01-setup-cognito.sh
-# Reuses the existing Cognito User Pool AND App Client from the Text2SQL project.
+# Reuses the existing Cognito User Pool AND App Client.
 # No new resources are created — this script discovers and saves the config
 # for use by other infra scripts.
 # =============================================================================
