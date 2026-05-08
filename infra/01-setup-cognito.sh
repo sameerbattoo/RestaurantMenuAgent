@@ -9,9 +9,9 @@
 set -e
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-west-2_5cqnrBvAg}"
+USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-west-2_XXXXXXXXX}"
 REGION="${AWS_REGION:-us-west-2}"
-WEBUI_CLIENT_ID="${COGNITO_CLIENT_ID:-2nc8c09npb6vru63mgfl7kiqb1}"
+WEBUI_CLIENT_ID="${COGNITO_CLIENT_ID:-XXXXXXXXXX}"
 
 # Colors
 GREEN='\033[0;32m'
