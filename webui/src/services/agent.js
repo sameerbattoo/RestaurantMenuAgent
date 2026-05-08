@@ -62,6 +62,16 @@ export async function invokeAgent(prompt, files = [], sessionId = 'default', onE
     'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
   }
 
+  // Add actor ID from access token username
+  try {
+    const payload = token.split('.')[1]
+    const claims = JSON.parse(atob(payload))
+    const actorId = claims.username || claims.email || claims['cognito:username'] || ''
+    if (actorId) {
+      headers['X-Amzn-Bedrock-AgentCore-Runtime-Custom-ActorId'] = actorId
+    }
+  } catch { /* ignore — fallback handled server-side */ }
+
   let resp
   try {
     resp = await fetch(url, {

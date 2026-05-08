@@ -98,7 +98,7 @@ names, or implementation details to the user. Communicate naturally.**
 - Use markdown tables for menu data
 - Show categories, item counts, price ranges
 - Highlight dietary options (vegetarian, vegan, gluten-free)
-- When listing menus, ALWAYS include the source_files URLs as clickable markdown links in the table (e.g., a "Source" column with links). These are the original uploaded files — never omit them.
+- When listing menus, ALWAYS include the source_files URLs as clickable markdown links in the table (e.g., a "Source" column). Show the actual file name as the link text (e.g., `[IMG_4477.HEIC](url)`) — never use generic numbered labels. These are the original uploaded files — never omit them.
 - Be concise but complete
 
 ## Editing:
@@ -231,9 +231,19 @@ def _extract_session_id(payload: dict, context) -> str:
 
 
 def _extract_actor_id(context) -> str:
-    """Extract actor ID from request headers."""
+    """Extract actor ID from request headers, falling back to JWT username.
+    
+    Sanitizes the ID to only contain alphanumeric, hyphens, and underscores
+    (AgentCore Memory API requirement).
+    """
+    import re
     headers = getattr(context, "request_headers", {}) or {}
-    return headers.get("x-amzn-bedrock-agentcore-runtime-custom-actorid", "default_user")
+    actor = headers.get("x-amzn-bedrock-agentcore-runtime-custom-actorid")
+    if not actor:
+        # Fallback: use the username from JWT
+        actor = _extract_user_name(context) or "default_user"
+    # Sanitize: replace dots and special chars with underscores
+    return re.sub(r'[^a-zA-Z0-9_-]', '_', actor)
 
 
 def _extract_user_name(context) -> str:

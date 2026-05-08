@@ -162,13 +162,34 @@ def list_restaurant_menus() -> str:
                 if url not in source_urls:
                     source_urls.append(url)
 
-        menus.append({
+        # Collect useful metadata
+        metadata = item.get("metadata", {})
+        entry = {
             "file_name": item.get("file_name", ""),
             "restaurant_name": item.get("restaurant_name", "Unknown"),
-            "total_items": item.get("metadata", {}).get("total_items", 0),
+            "total_items": metadata.get("total_items", 0),
             "processed_at": item.get("processed_at", ""),
             "source_files": source_urls,
-        })
+        }
+
+        # Include optional metadata if available
+        price_range = metadata.get("price_range")
+        if price_range and price_range != {"min": "N/A", "max": "N/A"}:
+            entry["price_range"] = price_range
+        dietary = metadata.get("dietary_options")
+        if dietary:
+            entry["dietary_options"] = dietary
+        address = metadata.get("address")
+        if address:
+            entry["address"] = address
+        phone = metadata.get("phone")
+        if phone:
+            entry["phone"] = phone
+        cuisine = metadata.get("cuisine_type")
+        if cuisine:
+            entry["cuisine_type"] = cuisine
+
+        menus.append(entry)
 
     menus.sort(key=lambda x: x.get("processed_at", ""), reverse=True)
 

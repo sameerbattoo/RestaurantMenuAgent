@@ -80,6 +80,7 @@ function ChatView({ theme, toggleTheme }) {
   const textareaRef = useRef(null)
   const chatContainerRef = useRef(null)
   const userScrolledUpRef = useRef(false)
+  const ttftRef = useRef(null) // Time to first token tracking
   const [pendingAutoSubmit, setPendingAutoSubmit] = useState(false)
 
   // Speech-to-text (Whisper tiny.en, runs in browser)
@@ -224,10 +225,15 @@ function ChatView({ theme, toggleTheme }) {
     ;(async () => {
       try {
         setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true, timestamp: new Date() }])
+        ttftRef.current = { start: performance.now(), captured: false }
         await invokeAgent(text, [], sessionId, (event) => {
           switch (event.type) {
             case 'content':
               setCookingActive(false)
+              if (ttftRef.current && !ttftRef.current.captured) {
+                ttftRef.current.ttft = Math.round(performance.now() - ttftRef.current.start)
+                ttftRef.current.captured = true
+              }
               setMessages((prev) => {
                 const updated = [...prev]
                 const last = updated[updated.length - 1]
@@ -258,7 +264,11 @@ function ChatView({ theme, toggleTheme }) {
                 const updated = [...prev]
                 const last = updated[updated.length - 1]
                 if (last && last.role === 'assistant') {
-                  updated[updated.length - 1] = { ...last, metrics: event.data }
+                  const metricsWithTtft = { ...event.data }
+                  if (ttftRef.current && ttftRef.current.ttft) {
+                    metricsWithTtft.ttft_ms = ttftRef.current.ttft
+                  }
+                  updated[updated.length - 1] = { ...last, metrics: metricsWithTtft }
                 }
                 return updated
               })
@@ -339,10 +349,17 @@ function ChatView({ theme, toggleTheme }) {
       // Add a placeholder assistant message that we'll stream into
       setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true, timestamp: new Date() }])
 
+      ttftRef.current = { start: performance.now(), captured: false }
+
       await invokeAgent(userContent, attachedFiles, sessionId, (event) => {
         switch (event.type) {
           case 'content':
             setCookingActive(false)
+            // Capture TTFT on first content chunk
+            if (ttftRef.current && !ttftRef.current.captured) {
+              ttftRef.current.ttft = Math.round(performance.now() - ttftRef.current.start)
+              ttftRef.current.captured = true
+            }
             setMessages((prev) => {
               const updated = [...prev]
               const last = updated[updated.length - 1]
@@ -402,7 +419,11 @@ function ChatView({ theme, toggleTheme }) {
               const updated = [...prev]
               const last = updated[updated.length - 1]
               if (last && last.role === 'assistant') {
-                updated[updated.length - 1] = { ...last, metrics: event.data }
+                const metricsWithTtft = { ...event.data }
+                if (ttftRef.current && ttftRef.current.ttft) {
+                  metricsWithTtft.ttft_ms = ttftRef.current.ttft
+                }
+                updated[updated.length - 1] = { ...last, metrics: metricsWithTtft }
               }
               return updated
             })
