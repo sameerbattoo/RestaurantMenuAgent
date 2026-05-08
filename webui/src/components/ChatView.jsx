@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import { invokeAgent } from '../services/agent'
 import { getUserName } from '../services/auth'
+import { useSpeechToText } from '../hooks/useSpeechToText'
 import ThemeToggle from './ThemeToggle'
 import MarkdownMessage from './MarkdownMessage'
+import AudioWaveform from './AudioWaveform'
 
 const ACCEPTED_TYPES = '.pdf,.jpg,.jpeg,.png,.heic,.heif,.tiff,.bmp,.webp'
 
@@ -76,6 +78,62 @@ function ChatView({ theme, toggleTheme }) {
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
+  const chatContainerRef = useRef(null)
+  const userScrolledUpRef = useRef(false)
+  const [pendingAutoSubmit, setPendingAutoSubmit] = useState(false)
+
+  // Speech-to-text (Whisper tiny.en, runs in browser)
+  const {
+    isListening,
+    isLoading: isSpeechLoading,
+    isModelLoading,
+    modelProgress,
+    transcript: speechTranscript,
+    error: speechError,
+    recordingDuration,
+    startListening,
+    stopListening,
+    resetTranscript,
+    isSupported: isSpeechSupported,
+  } = useSpeechToText({
+    model: 'Xenova/whisper-tiny.en',
+    silenceThreshold: 0.01,
+    silenceTimeout: 2000,
+    onSilenceDetected: () => {
+      stopListening()
+      setPendingAutoSubmit(true)
+    },
+  })
+
+  // Auto-submit speech transcript when recording stops
+  useEffect(() => {
+    if (speechTranscript && pendingAutoSubmit && !loading) {
+      setPendingAutoSubmit(false)
+      const text = speechTranscript.trim()
+      resetTranscript()
+      if (text) {
+        handleQuickAction(text)
+      }
+    }
+  }, [speechTranscript, pendingAutoSubmit, loading])
+
+  const handleMicClick = async () => {
+    if (isListening) {
+      stopListening()
+      setPendingAutoSubmit(true)
+    } else {
+      resetTranscript()
+      setInput('')
+      setPendingAutoSubmit(false)
+      await startListening()
+    }
+  }
+
+  const formatDuration = (seconds) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+  }
 
   // Fetch restaurant names on mount for dynamic suggestions
   useEffect(() => {
@@ -160,12 +218,12 @@ function ChatView({ theme, toggleTheme }) {
     if (loading) return
     setInput(text)
     // Directly trigger send with the text (bypasses stale state)
-    setMessages((prev) => [...prev, { role: 'user', content: text }])
+    setMessages((prev) => [...prev, { role: 'user', content: text, timestamp: new Date() }])
     setInput('')
     setLoading(true)
     ;(async () => {
       try {
-        setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true }])
+        setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true, timestamp: new Date() }])
         await invokeAgent(text, [], sessionId, (event) => {
           switch (event.type) {
             case 'content':
@@ -243,7 +301,13 @@ function ChatView({ theme, toggleTheme }) {
   }
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Only auto-scroll if user hasn't manually scrolled up
+    if (!userScrolledUpRef.current) {
+      const container = chatContainerRef.current
+      if (container) {
+        container.scrollTop = container.scrollHeight
+      }
+    }
   }, [messages])
 
   // Auto-resize textarea
@@ -266,14 +330,14 @@ function ChatView({ theme, toggleTheme }) {
       ? `${userContent}\n\n📎 ${fileNames.join(', ')}`
       : userContent
 
-    setMessages((prev) => [...prev, { role: 'user', content: displayContent }])
+    setMessages((prev) => [...prev, { role: 'user', content: displayContent, timestamp: new Date() }])
     setInput('')
     setFiles([])
     setLoading(true)
 
     try {
       // Add a placeholder assistant message that we'll stream into
-      setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true }])
+      setMessages((prev) => [...prev, { role: 'assistant', content: '', isStreaming: true, timestamp: new Date() }])
 
       await invokeAgent(userContent, attachedFiles, sessionId, (event) => {
         switch (event.type) {
@@ -413,6 +477,56 @@ function ChatView({ theme, toggleTheme }) {
     window.location.href = '/'
   }
 
+  const handleCopyMessage = async (content) => {
+    try {
+      const { marked } = await import('marked')
+      const html = marked.parse(content)
+      // Copy as rich HTML (for Word/Docs) + plain text fallback
+      const blob = new Blob([html], { type: 'text/html' })
+      const textBlob = new Blob([content], { type: 'text/plain' })
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': blob,
+          'text/plain': textBlob,
+        })
+      ])
+    } catch {
+      // Fallback: plain text copy
+      navigator.clipboard.writeText(content)
+    }
+  }
+
+  const handleExportConversation = async () => {
+    const { marked } = await import('marked')
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16)
+    let html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Menu Assistant Chat - ${timestamp}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:800px;margin:40px auto;padding:20px;background:#1a1a2e;color:#e0e0e0;}
+h1{color:#f97316;}.subtitle{color:#888;font-size:13px;margin-top:4px;}.msg{margin:16px 0;padding:16px;border-radius:12px;overflow-wrap:break-word;}.user{background:#f97316;color:white;margin-left:20%;}.user a{color:#fed7aa;}.assistant{background:#2d2d44;margin-right:10%;}.assistant a{color:#fb923c;}
+.role{font-weight:600;font-size:12px;opacity:0.7;margin-bottom:6px;}.time{font-size:11px;opacity:0.5;margin-top:8px;}.content{line-height:1.7;}
+.content h1,.content h2,.content h3{margin-top:1em;margin-bottom:0.5em;color:#f97316;}.content p{margin:0.5em 0;}.content ul,.content ol{margin:0.5em 0;padding-left:1.5em;}.content li{margin:0.25em 0;}
+.content table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px;}.content th,.content td{border:1px solid #444;padding:8px 12px;text-align:left;}.content th{background:#333;font-weight:600;}
+.content code{background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;font-size:0.9em;}.content pre{background:#1e293b;padding:12px;border-radius:8px;overflow-x:auto;}.content pre code{background:none;padding:0;}
+.content blockquote{border-left:3px solid #f97316;padding:0.5em 1em;margin:0.5em 0;opacity:0.8;}.content strong{color:#fff;}.content a{color:#fb923c;}
+.footer{margin-top:40px;padding-top:20px;border-top:1px solid #333;text-align:center;font-size:12px;color:#666;}.aws-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:#232f3e;border-radius:6px;color:#ff9900;font-weight:500;margin-top:8px;}</style></head><body>
+<h1>🍽️ Menu Assistant Chat</h1><p class="subtitle">Exported: ${new Date().toLocaleString()} • Session: ${sessionId.slice(0, 8)}...</p><hr style="border-color:#333;margin:20px 0;">\n`
+
+    messages.forEach((msg) => {
+      const role = msg.role === 'user' ? 'You' : 'Assistant'
+      const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''
+      const renderedContent = msg.role === 'assistant' ? marked.parse(msg.content) : msg.content.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
+      html += `<div class="msg ${msg.role}"><div class="role">${role}</div><div class="content">${renderedContent}</div><div class="time">${time}</div></div>\n`
+    })
+
+    html += `<div class="footer"><div class="aws-badge">☁️ Built by AWS Startup SA Team • Powered by Amazon Bedrock</div><p style="margin-top:8px;font-size:11px;">AgentCore Runtime • Claude Sonnet 4 • Strands SDK</p></div></body></html>`
+    const blob = new Blob([html], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `menu-chat-${timestamp}.html`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div
       className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-950 transition-colors duration-200"
@@ -423,17 +537,28 @@ function ChatView({ theme, toggleTheme }) {
       <header className="sticky top-0 z-10 glass-panel border-b border-gray-200/60 dark:border-gray-800/60 px-6 py-3">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 shadow-sm">
+            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 shadow-lg shadow-brand-500/20 animate-glow">
               <span className="text-lg">🍽️</span>
             </div>
             <div>
-              <h1 className="text-base font-semibold text-gray-900 dark:text-white leading-tight">
+              <h1 className="text-base font-semibold leading-tight gradient-text">
                 Menu Assistant
               </h1>
               <p className="text-xs text-gray-400 dark:text-gray-500">AWS Bedrock-powered menu processing</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleExportConversation}
+              disabled={messages.length === 0}
+              className="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 hover:text-brand-600 dark:hover:text-brand-400 px-3 py-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Export conversation to HTML"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Export
+            </button>
             <button
               onClick={handleNewConversation}
               className="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 hover:text-brand-600 dark:hover:text-brand-400 px-3 py-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
@@ -459,14 +584,32 @@ function ChatView({ theme, toggleTheme }) {
       </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-6">
+      <div
+        ref={chatContainerRef}
+        className="flex-1 overflow-y-auto px-4 py-6"
+        onScroll={(e) => {
+          const el = e.target
+          const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+          // If user scrolled more than 150px from bottom, they're reading history
+          userScrolledUpRef.current = distanceFromBottom > 150
+        }}
+      >
         <div className="max-w-7xl mx-auto">
           {messages.length === 0 && (
-            <div className="text-center mt-24 animate-fade-in">
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-500/10 to-brand-600/10 dark:from-brand-500/20 dark:to-brand-600/20 mb-5">
-                <span className="text-4xl">🍽️</span>
+            <div className="text-center mt-24 animate-fade-in relative">
+              {/* Floating particles background */}
+              <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                <div className="floating-particle absolute top-10 left-1/4 w-2 h-2 rounded-full bg-brand-500/20" style={{ animationDelay: '0s' }} />
+                <div className="floating-particle absolute top-20 right-1/3 w-3 h-3 rounded-full bg-brand-400/15" style={{ animationDelay: '1s' }} />
+                <div className="floating-particle absolute top-32 left-1/3 w-1.5 h-1.5 rounded-full bg-brand-600/20" style={{ animationDelay: '2s' }} />
+                <div className="floating-particle absolute top-16 right-1/4 w-2.5 h-2.5 rounded-full bg-brand-300/15" style={{ animationDelay: '3s' }} />
+                <div className="floating-particle absolute top-40 left-1/2 w-2 h-2 rounded-full bg-brand-500/10" style={{ animationDelay: '4s' }} />
               </div>
-              <h2 className="text-xl font-semibold text-gray-800 dark:text-gray-100 mb-2">
+
+              <div className="relative inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-brand-500/10 to-brand-600/20 dark:from-brand-500/20 dark:to-brand-600/30 mb-5 animate-glow">
+                <span className="text-5xl">🍽️</span>
+              </div>
+              <h2 className="text-2xl font-bold mb-2 gradient-text">
                 How can I help?
               </h2>
               <p className="text-gray-500 dark:text-gray-400 max-w-md mx-auto text-sm">
@@ -505,12 +648,13 @@ function ChatView({ theme, toggleTheme }) {
               className={`mb-5 flex items-end gap-2.5 animate-slide-up ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               style={{ animationDelay: `${Math.min(i * 50, 200)}ms` }}
             >
-              {/* Assistant avatar */}
+              {/* Assistant avatar — plate icon with spinning gradient ring + sparkle */}
               {msg.role !== 'user' && (
-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center shadow-sm mb-1">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                  </svg>
+                <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mb-1 relative">
+                  <div className="absolute inset-0 rounded-full bg-gradient-to-r from-brand-500 via-amber-300 to-yellow-200 animate-[spin_3s_linear_infinite] opacity-90" />
+                  <div className="absolute inset-[2px] rounded-full bg-gray-900 dark:bg-gray-800" />
+                  <span className="relative text-xs">🍽️</span>
+                  <span className="absolute -top-0.5 -right-0.5 text-[8px] animate-ping">✨</span>
                 </div>
               )}
 
@@ -524,9 +668,16 @@ function ChatView({ theme, toggleTheme }) {
                 }`}
               >
                 {msg.role === 'user' ? (
-                  <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
-                    {msg.content}
-                  </pre>
+                  <>
+                    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
+                      {msg.content}
+                    </pre>
+                    {msg.timestamp && (
+                      <span className="block text-[10px] text-white/50 mt-1.5 text-right">
+                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </>
                 ) : (
                   <>
                     <MarkdownMessage content={msg.content} />
@@ -558,6 +709,25 @@ function ChatView({ theme, toggleTheme }) {
                       </div>
                     )}
                     {msg.metrics && <MetricsBar metrics={msg.metrics} />}
+                    {/* Timestamp + actions */}
+                    {!msg.isStreaming && msg.content && (
+                      <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
+                        <span className="text-[10px] text-gray-400 dark:text-gray-600">
+                          {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleCopyMessage(msg.content)}
+                            className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded transition-colors"
+                            title="Copy response"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -575,10 +745,11 @@ function ChatView({ theme, toggleTheme }) {
 
           {loading && (!messages.length || messages[messages.length - 1]?.content === '') && (
             <div className="flex items-end gap-2.5 justify-start mb-4 animate-slide-up">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center shadow-sm mb-1">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                </svg>
+              <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mb-1 relative">
+                <div className="absolute inset-0 rounded-full bg-gradient-to-r from-brand-500 via-amber-300 to-yellow-200 animate-[spin_3s_linear_infinite] opacity-90" />
+                <div className="absolute inset-[2px] rounded-full bg-gray-900 dark:bg-gray-800" />
+                <span className="relative text-xs">🍽️</span>
+                <span className="absolute -top-0.5 -right-0.5 text-[8px] animate-ping">✨</span>
               </div>
               <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl px-5 py-4 shadow-sm">
                 {files.length > 0 || messages[messages.length - 1]?.content?.includes('📎') ? (
@@ -654,7 +825,50 @@ function ChatView({ theme, toggleTheme }) {
       {/* Input area */}
       <div className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-4 py-4">
         <div className="max-w-7xl mx-auto">
-          <div className="flex items-end gap-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl px-3 py-2 focus-within:ring-2 focus-within:ring-brand-500/50 focus-within:border-brand-400 dark:focus-within:border-brand-500 transition-all">
+          {/* Model loading progress */}
+          {isModelLoading && (
+            <div className="mb-3 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/50">
+              <svg className="h-4 w-4 animate-spin text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <div className="flex-1">
+                <p className="text-sm text-blue-700 dark:text-blue-300 font-medium">
+                  Loading speech model (first time only, ~40MB)... {modelProgress > 0 ? `${modelProgress}%` : ''}
+                </p>
+                {modelProgress > 0 && (
+                  <div className="mt-1.5 h-1.5 w-full bg-blue-100 dark:bg-blue-900/50 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                      style={{ width: `${modelProgress}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Listening indicator with waveform */}
+          {isListening && (
+            <div className="mb-3 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-green-50 dark:bg-green-950/30 border border-green-300 dark:border-green-700/50">
+              <AudioWaveform isActive={isListening} color="#22c55e" />
+              <div className="flex items-center gap-2 flex-1">
+                <span className="text-sm text-green-700 dark:text-green-300 font-medium">
+                  {isSpeechLoading ? 'Processing...' : 'Listening...'}
+                </span>
+                {speechTranscript && (
+                  <span className="text-sm text-green-600 dark:text-green-400 italic truncate max-w-[200px]">
+                    "{speechTranscript}"
+                  </span>
+                )}
+              </div>
+              <div className="px-2.5 py-1 bg-green-100 dark:bg-green-900/50 rounded-md font-mono text-sm font-semibold text-green-700 dark:text-green-300 min-w-[60px] text-center">
+                {formatDuration(recordingDuration)}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-end gap-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl px-3 py-2 focus-within:ring-2 focus-within:ring-brand-500/50 focus-within:border-brand-400 dark:focus-within:border-brand-500 transition-all input-glow">
             {/* File upload button */}
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -677,6 +891,32 @@ function ChatView({ theme, toggleTheme }) {
               aria-hidden="true"
             />
 
+            {/* Mic button */}
+            {isSpeechSupported && (
+              <button
+                onClick={handleMicClick}
+                disabled={loading || isModelLoading || isSpeechLoading}
+                className={`flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-full border-2 transition-all duration-300 ${
+                  isListening
+                    ? 'bg-red-500 border-red-500 text-white animate-[micPulse_1.5s_ease-in-out_infinite]'
+                    : 'bg-brand-500/10 dark:bg-brand-400/15 border-brand-500/30 dark:border-brand-400/30 text-brand-500 dark:text-brand-400 hover:bg-brand-500/20 dark:hover:bg-brand-400/25'
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+                title={isModelLoading ? 'Loading model...' : isListening ? 'Click to stop recording' : 'Click to start voice input'}
+                aria-label={isListening ? 'Stop recording' : 'Start voice input'}
+              >
+                {isModelLoading ? (
+                  <svg className="h-5 w-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </svg>
+                )}
+              </button>
+            )}
+
             {/* Textarea */}
             <textarea
               ref={textareaRef}
@@ -692,7 +932,7 @@ function ChatView({ theme, toggleTheme }) {
             <button
               onClick={handleSend}
               disabled={loading || (!input.trim() && files.length === 0)}
-              className="flex-shrink-0 p-2 bg-brand-500 hover:bg-brand-600 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 dark:disabled:text-gray-500 rounded-xl transition-all duration-200 hover:shadow-md hover:shadow-brand-500/25 disabled:shadow-none"
+              className="flex-shrink-0 p-2 bg-gradient-to-br from-brand-500 to-brand-600 hover:from-brand-600 hover:to-brand-700 disabled:from-gray-200 disabled:to-gray-300 dark:disabled:from-gray-700 dark:disabled:to-gray-800 text-white disabled:text-gray-400 dark:disabled:text-gray-500 rounded-xl transition-all duration-300 hover:shadow-lg hover:shadow-brand-500/30 hover:scale-105 disabled:shadow-none disabled:scale-100"
               aria-label="Send message"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -702,7 +942,23 @@ function ChatView({ theme, toggleTheme }) {
           </div>
 
           <p className="text-xs text-center text-gray-400 dark:text-gray-600 mt-2.5">
-            Drag & drop files or use the attach button. Supports PDF, JPG, PNG, HEIC, TIFF, WEBP.
+            Drag & drop files, use the attach button, or click the mic for voice input. Supports PDF, JPG, PNG, HEIC, TIFF, WEBP.
+            <button
+              onClick={() => {
+                const el = document.getElementById('session-id-display')
+                if (el) el.classList.toggle('hidden')
+              }}
+              className="ml-2 text-gray-400 dark:text-gray-500 hover:text-brand-500 dark:hover:text-brand-400 transition-colors"
+              title="Show session ID"
+            >
+              ⓘ
+            </button>
+          </p>
+          <p id="session-id-display" className="hidden text-[11px] text-center text-gray-500 dark:text-gray-400 mt-1 font-mono select-all cursor-pointer mx-auto w-fit bg-gray-100 dark:bg-gray-800 rounded px-3 py-1" title="Click to copy" onClick={() => navigator.clipboard.writeText(sessionId)}>
+            Session: {sessionId}
+          </p>
+          <p className="text-[11px] text-center text-gray-500 dark:text-gray-400 mt-2">
+            Built with ❤️ by <span className="font-semibold text-gray-600 dark:text-gray-300">AWS Startup SA Team</span> • Powered by <span className="font-semibold text-[#ff9900]">Amazon Bedrock</span>
           </p>
         </div>
       </div>

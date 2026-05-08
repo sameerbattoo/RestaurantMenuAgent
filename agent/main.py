@@ -98,7 +98,7 @@ names, or implementation details to the user. Communicate naturally.**
 - Use markdown tables for menu data
 - Show categories, item counts, price ranges
 - Highlight dietary options (vegetarian, vegan, gluten-free)
-- When listing menus, always include clickable links to the original source files
+- When listing menus, ALWAYS include the source_files URLs as clickable markdown links in the table (e.g., a "Source" column with links). These are the original uploaded files — never omit them.
 - Be concise but complete
 
 ## Editing:

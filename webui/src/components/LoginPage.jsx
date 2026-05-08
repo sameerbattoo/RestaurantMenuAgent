@@ -47,6 +47,9 @@ function LoginPage({ theme, toggleTheme }) {
             <p className="text-xs text-center text-gray-400 dark:text-gray-500">
               Secured with AWS Cognito
             </p>
+            <p className="text-[10px] text-center text-gray-300 dark:text-gray-600 mt-2">
+              Built by <span className="font-medium">AWS Startup SA Team</span> • Powered by Amazon Bedrock
+            </p>
           </div>
         </div>
       </div>
