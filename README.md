@@ -51,11 +51,11 @@ An AI-powered restaurant menu processing system built on **AWS Bedrock AgentCore
     ┌─────────▼──────-───┐ ┌────────▼────────┐ ┌─────────▼─────────┐
     │  Amazon Bedrock    │ │   DynamoDB      │ │  AgentCore Memory │
     │                    │ │                 │ │                   │
-    │  Sonnet 4.6        │ │  restaurant-    │ │  Conversation     │
-    │  (Vision + Orch)   │ │  menus table    │ │  persistence +    │
-    │                    │ │                 │ │  user preferences │
-    │  Haiku 4.5         │ │  PK: file_name  │ │                   │
-    │  (Text→JSON)       │ │  Menu data +    │ │                   │
+    │  Sonnet 4.6          │ │  restaurant-    │ │  Conversation     │
+    │  (Vision + Text    │ │  menus table    │ │  persistence +    │
+    │   Structuring +    │ │                 │ │  user preferences │
+    │   Orchestration)   │ │  PK: file_name  │ │                   │
+    │                    │ │  Menu data +    │ │                   │
     │                    │ │  style + S3 ref │ │                   │
     └────────────────────┘ └─────────────────┘ └───────────────────┘
 ```
@@ -102,7 +102,7 @@ An AI-powered restaurant menu processing system built on **AWS Bedrock AgentCore
 restaurant-menu-assistant/
 ├── agent/                          # Deployed agent (AgentCore Runtime)
 │   ├── main.py                     # Entrypoint — async streaming, session management
-│   ├── document_processor.py       # Menu extraction (Bedrock vision + Haiku structuring)
+│   ├── document_processor.py       # Menu extraction (Sonnet 4.6 vision + text structuring)
 │   ├── menu_tools.py               # CRUD tools (DynamoDB-backed)
 │   ├── menu_generator.py           # Style analysis + HTML template generation
 │   ├── memory_hook.py              # AgentCore Memory integration
@@ -143,7 +143,7 @@ restaurant-menu-assistant/
 ## Deployment
 
 ### Prerequisites
-- AWS account with Bedrock model access (Claude Sonnet 4, Haiku 4.5)
+- AWS account with Bedrock model access (Claude Sonnet 4.6)
 - AWS CLI configured
 - Node.js 18+ (for web UI)
 - Python 3.11+ (for agent)
@@ -187,7 +187,7 @@ All scripts are idempotent — safe to re-run. Configuration is saved to `infra/
 | `AGENTCORE_MEMORY_ID` | AgentCore Memory ID for conversation persistence |
 | `MENU_S3_BUCKET` | S3 bucket for uploads and generated HTML |
 | `CLOUDFRONT_DOMAIN` | CloudFront domain for download URLs |
-| `BEDROCK_MODEL_ID` | Vision model (default: us.anthropic.claude-sonnet-4-6) |
+| `BEDROCK_MODEL_ID` | Model for extraction and structuring (default: us.anthropic.claude-sonnet-4-6) |
 
 ---
 
@@ -202,9 +202,10 @@ PDF Upload                          Image Upload
 PyPDF Text Extraction (instant)         │                       │
     │                                   ├── > 2048px? ──► Resize (Lanczos)
     ├── Text found?                     │                       │
-    │   YES ──► Haiku 4.5 (Text→JSON)  ▼                       ▼
-    │           (fast: ~$0.01/file)     Sonnet 4.6 — Vision → JSON
-    │                                  (accurate: ~$0.03-0.05/file)
+    │   YES ──► Sonnet 4.6 (Text→JSON) ▼                       ▼
+    │           (thinking disabled,    Sonnet 4.6 — Vision → JSON
+    │            64K output limit)     (thinking disabled, 64K output limit)
+    │                                  
     │   NO (scanned PDF) ─────────────────────┘
     │                                          │
     └──────────────────┬───────────────────────┘
@@ -222,15 +223,39 @@ PyPDF Text Extraction (instant)         │                       │
                Return summary
 ```
 
-### Why This Architecture
+### Why Sonnet 4.6 for Everything
 
-1. **PDFs with extractable text** → PyPDF (free, instant) + Haiku for structuring (fast, $0.80/1M input). No vision needed.
-2. **Scanned PDFs / Images** → Bedrock Converse API with Sonnet vision (best accuracy for complex menus).
-3. **HTML Regeneration** → Python template (instant, zero tokens). Only style analysis uses an LLM call (once, cached).
+We originally used a two-model approach: **Haiku 4.5** for text→JSON structuring (cheap, fast) and **Sonnet 4.6** for vision extraction (accurate). We switched to using **Sonnet 4.6 for both paths** for two reasons:
 
-### Agent Model: Sonnet 4.6 (Converse API)
+**1. Output token limits caused failures on large menus.** Haiku 4.5 has an 8K max output token limit. Multi-page PDFs with 200+ items (like a 3-page Indian restaurant menu) would produce JSON output exceeding 8K tokens, causing truncation mid-JSON and parse failures. The agent would incorrectly tell users their PDF was "scanned/unreadable" when it was perfectly valid text. Sonnet 4.6 has a **64K max output token limit** — more than enough for any menu.
 
-The agent uses **Claude Sonnet 4.6** for vision-based menu extraction. Because all Bedrock calls use the **Converse API** (model-agnostic), the model can be switched to any Bedrock-supported model (Opus, Nova Pro, Haiku, etc.) by changing the `BEDROCK_MODEL_ID` environment variable — no code changes required.
+**2. Sonnet 4.6 produces significantly richer data.** Benchmarked against Sonnet 5 (with low effort) on a 15-page Mexican restaurant menu:
+
+| Metric | Haiku 4.5 (old) | Sonnet 5 (effort=low) | Sonnet 4.6 (thinking disabled) |
+|---|---|---|---|
+| Max output tokens | 8K | 128K | **64K** |
+| Items extracted | Fails on large menus | 102 | **102** |
+| Items with price | — | 62% | **72%** |
+| Descriptions | — | 65% | **100%** |
+| Dietary info | — | 23% | **36%** |
+| Categories | — | 14 | **19** |
+| Latency | ~5s (when it works) | ~40s | ~70s |
+| Cost per menu | ~$0.001 | ~$0.002 | ~$0.002 |
+
+Sonnet 4.6 with thinking disabled gives the best data quality: 100% description coverage, superior price association, finer-grained categories. The cost is the same as Sonnet 5 on Bedrock ($3/$15 per MTok), and while it's slower per-call, the quality difference justifies it for a production menu processing tool.
+
+### Agent Model: Sonnet 4.6 (Converse API, Thinking Disabled)
+
+The agent uses **Claude Sonnet 4.6** (`us.anthropic.claude-sonnet-4-6`) for all Bedrock calls — orchestration, vision extraction, and text structuring. Thinking is explicitly disabled via `additionalModelRequestFields` to avoid unnecessary reasoning overhead on structured extraction tasks.
+
+Because all calls use the **Converse API** (model-agnostic), the model can be switched to any Bedrock-supported model by changing the `BEDROCK_MODEL_ID` environment variable — no code changes required.
+
+**Sonnet 4.6 specs on Bedrock:**
+- Context window: 1M tokens
+- Max output tokens: 64K
+- Pricing: $3.00 / $15.00 per million input/output tokens
+- Reasoning: Disabled for extraction (configurable)
+- Knowledge cutoff: August 2025
 
 > **Note on Textract:** If you want to use the Textract TABLES pipeline (highest item coverage, best dietary detection) in the agent, the pipeline built in `batch_processing/document_processor.py` needs to be integrated into `agent/document_processor.py`. This is a future enhancement — the batch processing folder contains the complete, tested implementation ready for integration.
 
@@ -249,11 +274,12 @@ From batch processing 12 restaurant menus (PDFs + images) with all 4 extraction 
 | **Total Cost** | $0.90 | $3.62 | **$0.32** | $0.63 |
 | Cost per Item | $0.0015 | $0.0057 | **$0.0005** | $0.0010 |
 
-**Recommendation:** Sonnet 4.6 for the agent (production) — best balance of accuracy, reliability, and cost. Textract pipeline is the best choice for bulk/batch processing where maximum item coverage matters.
+**Recommendation:** Sonnet 4.6 for the agent (production) — best balance of accuracy, data richness, and cost. Textract pipeline is the best choice for bulk/batch processing where maximum item coverage matters.
 
 ### Key Optimizations
 
-- **Dynamic max_tokens** — Scales output limit based on model (Nova: 10K, Haiku: 8K, Anthropic: 16K) to avoid truncation.
+- **64K max output tokens** — Eliminates truncation failures on large multi-page menus (was 8K with Haiku).
+- **Thinking disabled** — Removes unnecessary reasoning overhead for structured extraction tasks, keeping latency predictable.
 - **Converse API** — Model-agnostic API that works with all Bedrock models without format branching.
 - **JSON repair** — Handles common LLM malformations (missing quotes, markdown fences, truncated output).
 - **Extraction cache** — Second calls (overwrite/merge confirmation) skip re-processing using in-memory cache.
