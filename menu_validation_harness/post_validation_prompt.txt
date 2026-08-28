@@ -1,0 +1,99 @@
+COMPLETE MENU JSON VALIDATION & ITEM SEPARATION
+
+Validate this complete menu JSON and separate items into VALID and INVALID categories based on the following FLEXIBLE criteria:
+
+MANDATORY FIELDS (MUST be present and valid):
+1. Category Structure: Each category must have a valid "category" name (non-empty string) and "items" array
+2. Item Essentials: Each item must have:
+   - "name": non-empty string
+   - "price": valid number (can be 0.0 for items with required modifiers)
+   - "description": string (can be empty string "")
+
+OPTIONAL FIELDS (If present, should be valid):
+3. Modifiers Structure (Boons / n8n nested shape preferred):
+   - Each modifier SHOULD have:
+     - "title": string (group label)
+     - "item_limit": string or number ("1" = pick one; "0" = multi)
+     - "mandatory": "yes"|"no" OR boolean
+     - "addonqty": string or number
+     - "type": "radio" | "checkbox"
+     - "option": { "option_id": ["",...], "name": [], "price": [], "unit": [] }
+       Arrays option_id/name/price/unit MUST be same length N; prices are STRINGS ("" if none)
+     - "options_detail": array length N of {
+         "name", "price", "unit", "submodifier": null | nested modifier object
+       }
+   - Nested hierarchy uses options_detail[i].submodifier (full modifier object), NOT a top-level sub_modifiers list
+   - Legacy shape { "name", "options": [{"name","price"}], "sub_modifiers": [...] } is also acceptable
+     (downstream converts it); do not mark items invalid solely for legacy shape
+
+4. Other Optional Fields:
+   - Any other fields are optional and don't affect validation
+
+FLEXIBLE VALIDATION RULES:
+- item_limit: Accept both numbers and strings
+- mandatory: Accept both booleans and strings ("yes"/"no" vs true/false)
+- addonqty: Accept both numbers and strings
+- Prices: Accept numbers, empty strings ("") for free options are VALID
+- Missing optional fields: NOT an error (dietary_tags, description can be missing/empty)
+- Extra fields: Ignore extra fields, don't report as errors
+- Preserve modifiers / options_detail / submodifier on valid items unchanged
+
+ONLY REPORT AS ERRORS:
+- Missing mandatory fields (category name, item name, item price)
+- Invalid data types for mandatory fields (null, undefined, non-string names)
+- Structural problems (misaligned Boons option.name/price/unit vs options_detail lengths)
+- Obvious data corruption or hallucinations
+- Functionality-breaking issues only
+
+DO NOT REPORT AS ERRORS:
+- String vs number format for item_limit, mandatory, addonqty
+- Missing optional fields like dietary_tags
+- Empty descriptions or missing descriptions
+- Different boolean representations ("yes"/"no" vs true/false)
+- Modifier shape using legacy "name"/"options"/"sub_modifiers" instead of "title"/"option"/"options_detail"
+
+RESPONSE FORMAT - Return ONLY this JSON structure (no markdown fences):
+{
+  "validation_summary": {
+    "total_items_processed": 0,
+    "valid_items_count": 0,
+    "invalid_items_count": 0,
+    "validation_status": "PASS" | "FAIL",
+    "overall_quality": "EXCELLENT" | "GOOD" | "FAIR" | "POOR"
+  },
+  "valid_categories": [
+    {
+      "category": "category_name",
+      "items": []
+    }
+  ],
+  "invalid_items": [
+    {
+      "original_category": "category_name",
+      "item": {},
+      "validation_errors": [
+        {
+          "type": "ERROR",
+          "field": "field_name",
+          "issue": "specific CRITICAL problem only",
+          "current_value": "current value",
+          "expected_value": "what it should be"
+        }
+      ]
+    }
+  ],
+  "issues_summary": [
+    {
+      "type": "ERROR",
+      "category": "category_name",
+      "item": "item_name",
+      "field": "field_name",
+      "issue": "specific CRITICAL problem only",
+      "suggestion": "how to fix it",
+      "current_value": "current value",
+      "expected_value": "what it should be"
+    }
+  ]
+}
+
+Complete Menu JSON to validate:
